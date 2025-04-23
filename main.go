@@ -212,35 +212,43 @@ func main() {
 	// Recursively add all directories to watch from the start
 	debugLog(&config, "Setting up recursive file watching from root: %s", config.RootDirectory)
 	err = filepath.Walk(config.RootDirectory, func(path string, info os.FileInfo, err error) error {
+		debugLog(&config, "Considering path: %s", path)
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			// Skip hidden directories and git directories
-			if strings.HasPrefix(info.Name(), ".") {
-				debugLog(&config, "Skipping hidden directory: %s", path)
-				return filepath.SkipDir
-			}
 
-			// Skip .git directories
-			if info.Name() == ".git" || strings.Contains(path, "/.git/") {
-				debugLog(&config, "Skipping git directory: %s", path)
-				return filepath.SkipDir
-			}
-
-			// Check if directory should be ignored based on patterns
-			if shouldIgnore, reason := ShouldIgnorePathWithConfig(path, &config); shouldIgnore {
-				debugLog(&config, "Skipping directory due to %s: %s", reason, path)
-				return filepath.SkipDir
-			}
-
-			err = watcher.Add(path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", path, err)
-			} else {
-				debugLog(&config, "Watching directory: %s", path)
-			}
+		if !info.IsDir() {
+			return nil
 		}
+		debugLog(&config, "Considering path: %s", path)
+
+		// Skip hidden directories (but not . or .. directory references)
+		name := info.Name()
+		if strings.HasPrefix(name, ".") && name != "." && name != ".." {
+			debugLog(&config, "Skipping hidden directory: %s", path)
+			return filepath.SkipDir
+		}
+
+		// Skip .git directories
+		if info.Name() == ".git" || strings.Contains(path, "/.git/") {
+			debugLog(&config, "Skipping git directory: %s", path)
+			return filepath.SkipDir
+		}
+
+		// Check if directory should be ignored based on patterns
+		if shouldIgnore, reason := ShouldIgnorePathWithConfig(path, &config); shouldIgnore {
+			debugLog(&config, "Skipping directory due to %s: %s", reason, path)
+			return filepath.SkipDir
+		}
+
+		debugLog(&config, "Watching path: %s", path)
+		err = watcher.Add(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", path, err)
+		} else {
+			debugLog(&config, "Watching directory: %s", path)
+		}
+
 		return nil
 	})
 
@@ -403,13 +411,6 @@ func main() {
 						}
 					}
 
-					// If a directory is created, watch it
-					if event.Has(fsnotify.Create) {
-						fileInfo, err := os.Stat(event.Name)
-						if err == nil && fileInfo.IsDir() && !strings.HasPrefix(filepath.Base(event.Name), ".") {
-							watcher.Add(event.Name)
-						}
-					}
 				case err, ok := <-watcher.Errors:
 					if !ok {
 						return

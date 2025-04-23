@@ -4,3 +4,5 @@
 
 # Ignore the README.md file
 README\.md$
+# Ignore the claudewatch binary but not directories
+^claudewatch$
