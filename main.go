@@ -26,15 +26,25 @@ type Config struct {
 	RootDirectory    string             // Directory to watch for changes
 	AICommentPattern *regexp.Regexp     // Pattern to detect AI comments
 	PromptTemplate   *template.Template // Template for the prompt when a file changes
+	IgnorePattern    *regexp.Regexp     // Pattern to ignore files when watching
 	Debug            bool               // Enable debug output
 }
 
-// Default prompt template
-const DefaultPromptTemplate = "Read the file at {{.File}}. Any comments in this file that end in `ai!` are instructions for you to modify this file. For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. In other words, in response to this prompt, you are only permitted to modify the file at path {{.File}}. Once you make the requested modifications, remove the comment that instructed you."
+// GetDefaultPromptTemplate returns the default template for prompts ai:ignore
+func GetDefaultPromptTemplate() (*template.Template, error) {
+	templateText := `Read the file at {{.File}}. The following comments in this file end with one of the supported markers ('` + strings.Join(supportedAIMarkers, "', '") + `') and are instructions for you to modify this file:
+
+{{range .Markers}}Line {{.LineNumber}}: {{.LineText}}{{end}}
+
+For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. In other words, in response to this prompt, you are only permitted to modify the file at path {{.File}}. Once you make the requested modifications, remove the comment that instructed you.`
+
+	return template.New("prompt").Parse(templateText)
+}
 
 // Template data structure
 type TemplateData struct {
-	File string // Absolute path of the file that changed
+	File    string             // Absolute path of the file that changed
+	Markers []AIMarkerLocation // Locations of AI markers with line numbers
 }
 
 // Helper function to print debug messages
@@ -54,12 +64,18 @@ func printHelp() {
 	fmt.Println("Options:")
 	fmt.Println("  -h, --help       Show this help message and exit")
 	fmt.Println("  --debug          Enable debug output")
-	fmt.Println("  --prompt TEXT    Customize the prompt template (use {{.File}} as a variable)")
+	fmt.Println("  --prompt TEXT    Customize the prompt template (use {{.File}} for file path and {{.Markers}} for the detected markers with line numbers)")
+	fmt.Println("  --ignore REGEX   Ignore files matching this regex pattern when watching")
 	fmt.Println("  --               Everything after this marker is passed directly to Claude")
+	fmt.Println("")
+	fmt.Println("Features:")
+	fmt.Println("  - Add '" + strings.Join(supportedAIMarkers, "', '") + "' at the end of a comment to trigger Claude to process that instruction") // ai:ignore
+	fmt.Println("  - Add 'ai:ignore' in a comment line before or on the same line as an instruction marker to skip processing it")                  // ai:ignore
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  claudewatch                   # Watch current directory")
 	fmt.Println("  claudewatch /path/to/project  # Watch specific directory")
+	fmt.Println("  claudewatch --ignore \"\\.js$\" # Ignore all .js files")
 	fmt.Println("  claudewatch -- --model-name claude-3-opus-20240229")
 	fmt.Println("")
 	fmt.Println("For more information, see: https://github.com/jtrim/claudewatch")
@@ -74,8 +90,8 @@ func main() {
 		}
 	}
 
-	// Parse the default prompt template
-	tmpl, err := template.New("prompt").Parse(DefaultPromptTemplate)
+	// Get the default prompt template
+	tmpl, err := GetDefaultPromptTemplate()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing default prompt template: %v\n", err)
 		os.Exit(1)
@@ -86,8 +102,9 @@ func main() {
 		ClaudeCommand:    "claude",
 		ClaudeArgs:       []string{},
 		RootDirectory:    ".",
-		AICommentPattern: regexp.MustCompile(`(?m)(?:\s*\/\/|\s*#|\s*\/\*|\s*\*)\s*.*ai!`),
+		AICommentPattern: markerPattern, // Using pattern from util.go
 		PromptTemplate:   tmpl,
+		IgnorePattern:    nil,   // Default to not ignoring any files
 		Debug:            false, // Debug mode off by default
 	}
 
@@ -129,7 +146,24 @@ func main() {
 				}
 				config.PromptTemplate = tmpl
 				debugLog(&config, "Using custom prompt template: %s", customTemplate)
+				debugLog(&config, "Note: Make sure your template contains {{.Markers}} for line numbers")
 				i++ // Skip the next argument (the template)
+				continue
+			}
+		}
+
+		// Check for --ignore flag
+		if arg == "--ignore" {
+			if i+1 < len(args) {
+				ignorePattern := args[i+1]
+				pattern, err := regexp.Compile(ignorePattern)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error parsing ignore pattern: %v\n", err)
+					os.Exit(1)
+				}
+				config.IgnorePattern = pattern
+				debugLog(&config, "Using ignore pattern: %s", ignorePattern)
+				i++ // Skip the next argument (the pattern)
 				continue
 			}
 		}
@@ -272,6 +306,12 @@ func main() {
 							continue
 						}
 
+						// Skip files matching the ignore pattern (if set)
+						if config.IgnorePattern != nil && config.IgnorePattern.MatchString(event.Name) {
+							debugLog(&config, "Skipping file due to ignore pattern: %s", event.Name)
+							continue
+						}
+
 						// Skip files processed recently
 						now := time.Now()
 						if lastProcessed, exists := processedFiles[event.Name]; exists {
@@ -287,7 +327,8 @@ func main() {
 							continue
 						}
 
-						if config.AICommentPattern.Match(content) {
+						markers := findActiveAIMarkers(string(content))
+						if len(markers) > 0 {
 							absPath, err := filepath.Abs(event.Name)
 							if err != nil {
 								continue
@@ -296,9 +337,14 @@ func main() {
 							// Log file change
 							fmt.Fprintf(os.Stderr, "\r\n[File change detected: %s - sending to Claude]\r\n", event.Name)
 
+							for _, marker := range markers {
+								fmt.Fprintf(os.Stderr, "  Line %d: %s\r\n", marker.LineNumber, marker.LineText)
+							}
+
 							// Prepare the template data
 							data := TemplateData{
-								File: absPath,
+								File:    absPath,
+								Markers: markers,
 							}
 
 							// Execute the template
@@ -392,24 +438,4 @@ func main() {
 	// Close the prompt channel and wait for goroutines to finish
 	close(promptChan)
 	wg.Wait()
-}
-
-// isEmacsTemp checks if a filename is an Emacs temporary file
-func isEmacsTemp(filename string) bool {
-	// Emacs auto-save files: #filename#
-	if strings.HasPrefix(filename, "#") && strings.HasSuffix(filename, "#") {
-		return true
-	}
-
-	// Emacs backup files: filename~
-	if strings.HasSuffix(filename, "~") {
-		return true
-	}
-
-	// Emacs lock files: .#filename
-	if strings.HasPrefix(filename, ".#") {
-		return true
-	}
-
-	return false
 }
