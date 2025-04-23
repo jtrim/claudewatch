@@ -94,6 +94,17 @@ Any comment ending with "ai!" will be detected:
 /* Refactor this code to be more efficient ai! */
 ```
 
+## Disclaimer
+
+⚠️ **EXPERIMENTAL SOFTWARE**: `claudewatch` is experimental software provided "as is" without any warranties or guarantees of any kind, either expressed or implied. By using this software, you acknowledge and accept that:
+
+- It may contain bugs, errors, or security vulnerabilities
+- It may not function as expected or may fail entirely
+- It may be modified or discontinued at any time without notice
+- No guarantees of performance, reliability, or suitability for any purpose are made
+
+**USE AT YOUR OWN RISK**.
+
 ## License
 
 MIT
