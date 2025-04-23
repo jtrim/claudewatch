@@ -1,0 +1,6 @@
+# .claudewatchignore file for claudewatch
+# This file contains regex patterns (one per line) of files to ignore
+# Empty lines and lines starting with # are ignored
+
+# Ignore the README.md file
+README\.md$

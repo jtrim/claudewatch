@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -85,7 +87,7 @@ func findActiveAIMarkers(content string) []AIMarkerLocation {
 
 	for i, line := range lines {
 		lineNumber := i + 1 // Line numbers start from 1
-		
+
 		if hasBothMarkerAndIgnore(line) {
 			continue
 		}
@@ -136,7 +138,7 @@ func ShouldIgnoreFile(filePath string, ignorePattern *regexp.Regexp) bool {
 	if ignorePattern == nil {
 		return false
 	}
-	
+
 	// Check if the file path matches the ignore pattern
 	return ignorePattern.MatchString(filePath)
 }
@@ -145,16 +147,99 @@ func ShouldIgnoreFile(filePath string, ignorePattern *regexp.Regexp) bool {
 func IsHiddenOrSpecialFile(filePath string) bool {
 	// Get the base filename
 	baseName := filepath.Base(filePath)
-	
+
 	// Check if it's a hidden file (starts with a dot)
 	if strings.HasPrefix(baseName, ".") {
 		return true
 	}
-	
+
 	// Check if it's an Emacs temporary file
 	if isEmacsTemp(baseName) {
 		return true
 	}
-	
+
 	return false
+}
+
+// IgnorePatterns contains compiled regular expressions from .claudewatchignore
+type IgnorePatterns []*regexp.Regexp
+
+// LoadIgnorePatterns loads ignore patterns from .claudewatchignore file
+func LoadIgnorePatterns(rootDir string) (IgnorePatterns, error) {
+	ignoreFilePath := filepath.Join(rootDir, ".claudewatchignore")
+
+	// Check if the ignore file exists
+	_, err := os.Stat(ignoreFilePath)
+	if os.IsNotExist(err) {
+		// No ignore file, return empty patterns
+		return nil, nil
+	} else if err != nil {
+		// Error accessing the file
+		return nil, err
+	}
+
+	// Open and read the ignore file
+	file, err := os.Open(ignoreFilePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var patterns IgnorePatterns
+	scanner := bufio.NewScanner(file)
+
+	// Read line by line
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Compile the regular expression
+		pattern, err := regexp.Compile(line)
+		if err != nil {
+			// Continue with other patterns if one fails
+			continue
+		}
+
+		patterns = append(patterns, pattern)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return patterns, nil
+}
+
+// MatchesAnyPattern checks if a file path matches any of the ignore patterns
+func (p IgnorePatterns) MatchesAnyPattern(filePath string) bool {
+	if len(p) == 0 {
+		return false
+	}
+
+	for _, pattern := range p {
+		if pattern.MatchString(filePath) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ShouldIgnoreFileWithConfig checks if a file should be ignored based on both ignore pattern and ignore patterns
+func ShouldIgnoreFileWithConfig(filePath string, config *Config) (bool, string) {
+	// Check the single ignore pattern first
+	if config.IgnorePattern != nil && config.IgnorePattern.MatchString(filePath) {
+		return true, "ignore pattern (--ignore)"
+	}
+
+	// Then check patterns from .claudewatchignore
+	if config.IgnorePatterns != nil && config.IgnorePatterns.MatchesAnyPattern(filePath) {
+		return true, ".claudewatchignore pattern"
+	}
+
+	return false, ""
 }

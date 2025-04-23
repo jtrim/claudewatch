@@ -16,6 +16,7 @@ according to the comments.
 - Automatically sends files with AI comments to Claude with specific instructions
 - Customizable prompt template with `--prompt` flag
 - Debug mode with `--debug` flag
+- Support for `.claudewatchignore` file with regex patterns to exclude files from watching
 
 ## Installation
 
@@ -80,19 +81,47 @@ By default, `claudewatch` watches the current directory. You can specify a diffe
 
 ## AI Comment Format
 
-Any comment ending with "ai!" will be detected:
+Any comment ending with one of the supported markers (`ai!`, `!ai`, or `ai?`) will be detected. Markers are case-insensitive:
 
 ```go
 // Change this function to use a Map instead of a Slice ai!
 ```
 
 ```python
-# Fix the bug in this function ai!
+# Fix the bug in this function !ai
 ```
 
 ```js
-/* Refactor this code to be more efficient ai! */
+/* Refactor this code to be more efficient AI? */
 ```
+
+### Ignoring AI Instructions
+
+You can use `ai:ignore` (also case-insensitive) to prevent processing of an AI instruction:
+
+```go
+// ai:ignore
+// This comment with an AI marker won't be processed ai!
+```
+
+You can also put both on the same line:
+
+```python
+# ai:ignore ai! This instruction will be ignored
+```
+
+### Ignoring Files with .claudewatchignore
+
+You can create a `.claudewatchignore` file in the root directory being watched to exclude files from being processed. The file should contain one Go-style regular expression pattern per line:
+
+```
+# This is a comment in the .claudewatchignore file
+\.js$          # Ignore all JavaScript files
+node_modules/  # Ignore files in the node_modules directory
+test_.*\.go    # Ignore Go test files with names starting with test_
+```
+
+Blank lines and lines starting with `#` are ignored. Each regex pattern is applied to the full file path, and if there's a match, the file is excluded from being processed.
 
 ## Disclaimer
 

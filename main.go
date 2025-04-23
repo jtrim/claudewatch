@@ -27,6 +27,7 @@ type Config struct {
 	AICommentPattern *regexp.Regexp     // Pattern to detect AI comments
 	PromptTemplate   *template.Template // Template for the prompt when a file changes
 	IgnorePattern    *regexp.Regexp     // Pattern to ignore files when watching
+	IgnorePatterns   IgnorePatterns     // Patterns from .claudewatchignore file
 	Debug            bool               // Enable debug output
 }
 
@@ -71,6 +72,7 @@ func printHelp() {
 	fmt.Println("Features:")
 	fmt.Println("  - Add '" + strings.Join(supportedAIMarkers, "', '") + "' at the end of a comment to trigger Claude to process that instruction") // ai:ignore
 	fmt.Println("  - Add 'ai:ignore' in a comment line before or on the same line as an instruction marker to skip processing it")                  // ai:ignore
+	fmt.Println("  - Create a .claudewatchignore file with one regex pattern per line to exclude files from being watched")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  claudewatch                   # Watch current directory")
@@ -105,6 +107,7 @@ func main() {
 		AICommentPattern: markerPattern, // Using pattern from util.go
 		PromptTemplate:   tmpl,
 		IgnorePattern:    nil,   // Default to not ignoring any files
+		IgnorePatterns:   nil,   // Will be loaded from .claudewatchignore
 		Debug:            false, // Debug mode off by default
 	}
 
@@ -187,6 +190,15 @@ func main() {
 	config.ClaudeArgs = claudeArgs
 	if len(claudeArgs) > 0 {
 		debugLog(&config, "Passing arguments to Claude: %v", config.ClaudeArgs)
+	}
+
+	// Load ignore patterns from .claudewatchignore if it exists
+	ignorePatterns, err := LoadIgnorePatterns(config.RootDirectory)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Error loading .claudewatchignore file: %v\n", err)
+	} else if ignorePatterns != nil {
+		config.IgnorePatterns = ignorePatterns
+		debugLog(&config, "Loaded %d patterns from .claudewatchignore", len(ignorePatterns))
 	}
 
 	// Create a new file watcher
@@ -306,9 +318,9 @@ func main() {
 							continue
 						}
 
-						// Skip files matching the ignore pattern (if set)
-						if config.IgnorePattern != nil && config.IgnorePattern.MatchString(event.Name) {
-							debugLog(&config, "Skipping file due to ignore pattern: %s", event.Name)
+						// Check if file should be ignored based on patterns
+						if shouldIgnore, reason := ShouldIgnoreFileWithConfig(event.Name, &config); shouldIgnore {
+							debugLog(&config, "Skipping file due to %s: %s", reason, event.Name)
 							continue
 						}
 
