@@ -209,12 +209,43 @@ func main() {
 	}
 	defer watcher.Close()
 
-	// Add the root directory explicitly to watch
-	err = watcher.Add(config.RootDirectory)
+	// Recursively add all directories to watch from the start
+	debugLog(&config, "Setting up recursive file watching from root: %s", config.RootDirectory)
+	err = filepath.Walk(config.RootDirectory, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			// Skip hidden directories and git directories
+			if strings.HasPrefix(info.Name(), ".") {
+				debugLog(&config, "Skipping hidden directory: %s", path)
+				return filepath.SkipDir
+			}
+
+			// Skip .git directories
+			if info.Name() == ".git" || strings.Contains(path, "/.git/") {
+				debugLog(&config, "Skipping git directory: %s", path)
+				return filepath.SkipDir
+			}
+
+			// Check if directory should be ignored based on patterns
+			if shouldIgnore, reason := ShouldIgnorePathWithConfig(path, &config); shouldIgnore {
+				debugLog(&config, "Skipping directory due to %s: %s", reason, path)
+				return filepath.SkipDir
+			}
+
+			err = watcher.Add(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", path, err)
+			} else {
+				debugLog(&config, "Watching directory: %s", path)
+			}
+		}
+		return nil
+	})
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error watching root directory %s: %v\n", config.RootDirectory, err)
-	} else {
-		debugLog(&config, "Watching root directory: %s", config.RootDirectory)
+		fmt.Fprintf(os.Stderr, "Error setting up recursive file watching: %v\n", err)
 	}
 
 	// Debug: Check if Claude executable exists
@@ -319,7 +350,7 @@ func main() {
 						}
 
 						// Check if file should be ignored based on patterns
-						if shouldIgnore, reason := ShouldIgnoreFileWithConfig(event.Name, &config); shouldIgnore {
+						if shouldIgnore, reason := ShouldIgnorePathWithConfig(event.Name, &config); shouldIgnore {
 							debugLog(&config, "Skipping file due to %s: %s", reason, event.Name)
 							continue
 						}
@@ -408,38 +439,6 @@ func main() {
 			}
 		}
 	}()
-
-	// Recursively add directories to watch
-	err = filepath.Walk(config.RootDirectory, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			// Skip hidden directories and git directories
-			if strings.HasPrefix(info.Name(), ".") {
-				debugLog(&config, "Skipping hidden directory: %s", path)
-				return filepath.SkipDir
-			}
-
-			// Skip .git directories
-			if info.Name() == ".git" || strings.Contains(path, "/.git/") {
-				debugLog(&config, "Skipping git directory: %s", path)
-				return filepath.SkipDir
-			}
-
-			err = watcher.Add(path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", path, err)
-			} else {
-				debugLog(&config, "Watching directory: %s", path)
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error walking directories: %v\n", err)
-	}
 
 	// Wait for Claude to finish
 	err = claudeCmd.Wait()

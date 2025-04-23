@@ -229,15 +229,16 @@ func (p IgnorePatterns) MatchesAnyPattern(filePath string) bool {
 	return false
 }
 
-// ShouldIgnoreFileWithConfig checks if a file should be ignored based on both ignore pattern and ignore patterns
-func ShouldIgnoreFileWithConfig(filePath string, config *Config) (bool, string) {
+// ShouldIgnorePathWithConfig checks if a path should be ignored based on both ignore pattern and ignore patterns
+// Works for both files and directories
+func ShouldIgnorePathWithConfig(path string, config *Config) (bool, string) {
 	// Check the single ignore pattern first
-	if config.IgnorePattern != nil && config.IgnorePattern.MatchString(filePath) {
+	if config.IgnorePattern != nil && config.IgnorePattern.MatchString(path) {
 		return true, "ignore pattern (--ignore)"
 	}
 
 	// Then check patterns from .claudewatchignore
-	if config.IgnorePatterns != nil && config.IgnorePatterns.MatchesAnyPattern(filePath) {
+	if config.IgnorePatterns != nil && config.IgnorePatterns.MatchesAnyPattern(path) {
 		return true, ".claudewatchignore pattern"
 	}
 
