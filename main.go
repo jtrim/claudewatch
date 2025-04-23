@@ -21,12 +21,12 @@ import (
 
 // Configuration options
 type Config struct {
-	ClaudeCommand    string            // Command to start the Claude CLI
-	ClaudeArgs       []string          // Arguments for Claude CLI
-	RootDirectory    string            // Directory to watch for changes
-	AICommentPattern *regexp.Regexp    // Pattern to detect AI comments
+	ClaudeCommand    string             // Command to start the Claude CLI
+	ClaudeArgs       []string           // Arguments for Claude CLI
+	RootDirectory    string             // Directory to watch for changes
+	AICommentPattern *regexp.Regexp     // Pattern to detect AI comments
 	PromptTemplate   *template.Template // Template for the prompt when a file changes
-	Debug            bool              // Enable debug output
+	Debug            bool               // Enable debug output
 }
 
 // Default prompt template
@@ -44,7 +44,36 @@ func debugLog(config *Config, format string, args ...interface{}) {
 	}
 }
 
+// printHelp displays the usage information
+func printHelp() {
+	fmt.Println("Usage: claudewatch [options] [directory] [-- claude_arguments]")
+	fmt.Println("")
+	fmt.Println("A transparent wrapper for the Claude CLI that watches file changes and")
+	fmt.Println("automatically sends AI-directed instructions to Claude.")
+	fmt.Println("")
+	fmt.Println("Options:")
+	fmt.Println("  -h, --help       Show this help message and exit")
+	fmt.Println("  --debug          Enable debug output")
+	fmt.Println("  --prompt TEXT    Customize the prompt template (use {{.File}} as a variable)")
+	fmt.Println("  --               Everything after this marker is passed directly to Claude")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  claudewatch                   # Watch current directory")
+	fmt.Println("  claudewatch /path/to/project  # Watch specific directory")
+	fmt.Println("  claudewatch -- --model-name claude-3-opus-20240229")
+	fmt.Println("")
+	fmt.Println("For more information, see: https://github.com/jtrim/claudewatch")
+	os.Exit(0)
+}
+
 func main() {
+	// Check for help flag
+	for _, arg := range os.Args[1:] {
+		if arg == "-h" || arg == "--help" || arg == "help" {
+			printHelp()
+		}
+	}
+
 	// Parse the default prompt template
 	tmpl, err := template.New("prompt").Parse(DefaultPromptTemplate)
 	if err != nil {
@@ -188,7 +217,7 @@ func main() {
 			}
 		}
 	}()
-	ch <- syscall.SIGWINCH // Initial resize
+	ch <- syscall.SIGWINCH                        // Initial resize
 	defer func() { signal.Stop(ch); close(ch) }() // Cleanup signals when done
 
 	// Set stdin in raw mode
@@ -266,12 +295,12 @@ func main() {
 
 							// Log file change
 							fmt.Fprintf(os.Stderr, "\r\n[File change detected: %s - sending to Claude]\r\n", event.Name)
-							
+
 							// Prepare the template data
 							data := TemplateData{
 								File: absPath,
 							}
-							
+
 							// Execute the template
 							var promptBuf strings.Builder
 							err = config.PromptTemplate.Execute(&promptBuf, data)
@@ -279,7 +308,7 @@ func main() {
 								fmt.Fprintf(os.Stderr, "Error executing prompt template: %v\n", err)
 								continue
 							}
-							
+
 							// Send the generated prompt to the channel for processing
 							promptChan <- promptBuf.String()
 						}
