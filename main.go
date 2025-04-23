@@ -35,8 +35,8 @@ type Config struct {
 func GetDefaultPromptTemplate() (*template.Template, error) {
 	templateText := `Read the file at {{.File}}. The following comments in this file end with one of the supported markers ('` + strings.Join(supportedAIMarkers, "', '") + `') and are instructions for you to modify this file:
 
-{{range .Markers}}Line {{.LineNumber}}: {{.LineText}}{{end}}
-
+{{range .Markers}}Line {{.LineNumber}}: {{.LineText}}
+{{end}}
 For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. In other words, in response to this prompt, you are only permitted to modify the file at path {{.File}}. Once you make the requested modifications, remove the comment that instructed you.`
 
 	return template.New("prompt").Parse(templateText)
