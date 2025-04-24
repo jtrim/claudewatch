@@ -33,7 +33,7 @@ type Config struct {
 
 // GetDefaultPromptTemplate returns the default template for prompts ai:ignore
 func GetDefaultPromptTemplate() (*template.Template, error) {
-	templateText := `Read the file at {{.File}}. The following comments are instructions for you to modify this file:
+	templateText := `The following comments are instructions for you to modify this file: {{.File}}
 
 {{range .Markers}}Line {{.LineNumber}}: {{.LineText}}
 {{end}}
