@@ -20,18 +20,16 @@ according to the comments.
 
 ## Installation
 
-First, ensure you have Go installed on your system. Then run:
+Run:
 
-```bash
-go build
 ```
-
-This will create the `claudewatch` executable in the current directory.
+$ go install github.com/jtrim/claudewatch@latest
+```
 
 ## Requirements
 
 - Claude CLI installed and available in your PATH
-- Go 1.18 or later
+- For development: Go 1.18 or later
 
 ## Usage
 
