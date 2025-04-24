@@ -51,22 +51,22 @@ By default, `claudewatch` watches the current directory. You can specify a diffe
 
 ```bash
 # Basic usage - watches current directory
-./claudewatch
+$ claudewatch
 
 # Watch a specific directory
-./claudewatch /path/to/project
+$ claudewatch /path/to/project
 
 # Enable debug output
-./claudewatch --debug
+$ claudewatch --debug
 
 # Use a custom prompt template
-./claudewatch --prompt "Please modify {{.File}} according to the 'ai!' comments."
+$ claudewatch --prompt "Please modify {{.File}} according to the 'ai!' comments."
 
 # Pass arguments to Claude
-./claudewatch -- --model-name claude-3-opus-20240229
+$ claudewatch -- --model-name claude-3-opus-20240229
 
 # Combined usage
-./claudewatch --debug /path/to/project -- --model-name claude-3-opus-20240229
+$ claudewatch --debug /path/to/project -- --model-name claude-3-opus-20240229
 ```
 
 ## How It Works
