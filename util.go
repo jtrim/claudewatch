@@ -144,12 +144,19 @@ func ShouldIgnoreFile(filePath string, ignorePattern *regexp.Regexp) bool {
 }
 
 // IsHiddenOrSpecialFile checks if a file is a hidden file, a special file, or an Emacs temp file
+// It properly handles directory reference "." (not considered special) but treats ".." as special
 func IsHiddenOrSpecialFile(filePath string) bool {
 	// Get the base filename
 	baseName := filepath.Base(filePath)
 
+	// Parent directory reference is treated as special (we don't want to watch outside the root)
+	if baseName == ".." {
+		return true
+	}
+	
 	// Check if it's a hidden file (starts with a dot)
-	if strings.HasPrefix(baseName, ".") {
+	// but exclude current directory "."
+	if strings.HasPrefix(baseName, ".") && baseName != "." {
 		return true
 	}
 

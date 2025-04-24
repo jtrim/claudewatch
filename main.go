@@ -34,12 +34,14 @@ type Config struct {
 // GetDefaultPromptTemplate returns the default template for prompts ai:ignore
 func GetDefaultPromptTemplate() (*template.Template, error) {
 	templateText := `The following comments are instructions for you to modify this file: {{.File}}
+It's critically important for you to understand this task as a sequence of two steps. First, you'll remove the following comments from the file. There's a scary monster watching this file, and if you write this file with these comments present, the scary monster is gonna get you.
+Once you've removed these comments from the file, AND ONLY AFTER THE COMMENTS HAVE BEEN REMOVED, you may move onto your next task, which is to treat the comments as instructions for you to make modifications to this file. The comments are:
 
 {{range .Markers}}Line {{.LineNumber}}: {{.LineText}}
 {{end}}
-For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. However, if modifying other files would be necessary to address the feedback, explain your reasoning and ask for permission.
+For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. However, if modifying other files would be necessary to address the feedback, pause, explain your reasoning and ask for permission.
 
-Your first edit will be to remove these comment(s) from the file. Next you'll proceed with the implementation to address them. Once you make the requested modifications, your current task is complete and you may await additional instruction.`
+REMEMBER: First, you'll remove these comment(s) from the file. This is a critical instruction not to be ignored. Second, you'll proceed with the implementation to address them. Once you make the requested modifications, your current task is complete and you may await additional instruction.`
 
 	return template.New("prompt").Parse(templateText)
 }
@@ -84,6 +86,99 @@ func printHelp() {
 	fmt.Println("")
 	fmt.Println("For more information, see: https://github.com/jtrim/claudewatch")
 	os.Exit(0)
+}
+
+// watchDirectory adds a directory and its subdirectories to the watcher
+// Returns true if the directory was added, false if it was skipped
+func watchDirectory(watcher *fsnotify.Watcher, dirPath string, config *Config, skipRoot bool) error {
+	debugLog(config, "Considering path for watching: %s", dirPath)
+
+	// Get directory info
+	info, err := os.Stat(dirPath)
+	if err != nil {
+		return err
+	}
+
+	if !info.IsDir() {
+		return nil
+	}
+
+	// Root directory check
+	name := info.Name()
+
+	// Skip hidden directories (but not . or .. directory references)
+	if IsHiddenOrSpecialFile(dirPath) {
+		debugLog(config, "Skipping hidden directory: %s", dirPath)
+		return filepath.SkipDir
+	}
+
+	// Skip .git directories
+	if name == ".git" || strings.Contains(dirPath, "/.git/") {
+		debugLog(config, "Skipping git directory: %s", dirPath)
+		return filepath.SkipDir
+	}
+
+	// Check if directory should be ignored based on patterns
+	if shouldIgnore, reason := ShouldIgnorePathWithConfig(dirPath, config); shouldIgnore {
+		debugLog(config, "Skipping directory due to %s: %s", reason, dirPath)
+		return filepath.SkipDir
+	}
+
+	// Add the directory to the watcher if not skipping root
+	if !skipRoot {
+		err = watcher.Add(dirPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", dirPath, err)
+		} else {
+			debugLog(config, "Watching directory: %s", dirPath)
+		}
+	}
+
+	// Walk subdirectories
+	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip the root directory (already processed)
+		if path == dirPath {
+			return nil
+		}
+
+		if !info.IsDir() {
+			return nil
+		}
+
+		// Skip hidden directories
+		if IsHiddenOrSpecialFile(path) {
+			debugLog(config, "Skipping hidden subdirectory: %s", path)
+			return filepath.SkipDir
+		}
+
+		// Skip .git directories
+		if info.Name() == ".git" || strings.Contains(path, "/.git/") {
+			debugLog(config, "Skipping git subdirectory: %s", path)
+			return filepath.SkipDir
+		}
+
+		// Check if subdirectory should be ignored
+		if shouldIgnore, reason := ShouldIgnorePathWithConfig(path, config); shouldIgnore {
+			debugLog(config, "Skipping subdirectory due to %s: %s", reason, path)
+			return filepath.SkipDir
+		}
+
+		// Add the subdirectory to the watcher
+		err = watcher.Add(path)
+		if err != nil {
+			debugLog(config, "Error watching subdirectory %s: %v", path, err)
+		} else {
+			debugLog(config, "Watching subdirectory: %s", path)
+		}
+
+		return nil
+	})
+
+	return err
 }
 
 func main() {
@@ -213,46 +308,7 @@ func main() {
 
 	// Recursively add all directories to watch from the start
 	debugLog(&config, "Setting up recursive file watching from root: %s", config.RootDirectory)
-	err = filepath.Walk(config.RootDirectory, func(path string, info os.FileInfo, err error) error {
-		debugLog(&config, "Considering path: %s", path)
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			return nil
-		}
-		debugLog(&config, "Considering path: %s", path)
-
-		// Skip hidden directories (but not . or .. directory references)
-		name := info.Name()
-		if strings.HasPrefix(name, ".") && name != "." && name != ".." {
-			debugLog(&config, "Skipping hidden directory: %s", path)
-			return filepath.SkipDir
-		}
-
-		// Skip .git directories
-		if info.Name() == ".git" || strings.Contains(path, "/.git/") {
-			debugLog(&config, "Skipping git directory: %s", path)
-			return filepath.SkipDir
-		}
-
-		// Check if directory should be ignored based on patterns
-		if shouldIgnore, reason := ShouldIgnorePathWithConfig(path, &config); shouldIgnore {
-			debugLog(&config, "Skipping directory due to %s: %s", reason, path)
-			return filepath.SkipDir
-		}
-
-		debugLog(&config, "Watching path: %s", path)
-		err = watcher.Add(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", path, err)
-		} else {
-			debugLog(&config, "Watching directory: %s", path)
-		}
-
-		return nil
-	})
+	err = watchDirectory(watcher, config.RootDirectory, &config, false)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error setting up recursive file watching: %v\n", err)
@@ -344,18 +400,35 @@ func main() {
 						return
 					}
 
-					// Only process write events for regular files
+					// Process write events and create events
 					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-						// Check if it's a file we should process
+						// Check if the file/directory exists
 						fileInfo, err := os.Stat(event.Name)
 						if err != nil {
 							continue
 						}
 
-						// Skip directories and special files
-						if fileInfo.IsDir() ||
-							strings.HasPrefix(filepath.Base(event.Name), ".") ||
-							isEmacsTemp(filepath.Base(event.Name)) {
+						// Handle directory creation separately
+						if fileInfo.IsDir() && event.Has(fsnotify.Create) {
+							debugLog(&config, "New directory created: %s", event.Name)
+
+							// Try to watch the new directory and its subdirectories
+							err = watchDirectory(watcher, event.Name, &config, false)
+
+							if err != nil {
+								if err == filepath.SkipDir {
+									debugLog(&config, "Directory skipped: %s", event.Name)
+								} else {
+									debugLog(&config, "Error watching new directory: %v", err)
+								}
+							}
+
+							continue
+						}
+
+						// Skip hidden and special files
+						if IsHiddenOrSpecialFile(event.Name) {
+							debugLog(&config, "Skipping hidden or special file: %s", event.Name)
 							continue
 						}
 
