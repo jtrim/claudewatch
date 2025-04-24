@@ -33,11 +33,13 @@ type Config struct {
 
 // GetDefaultPromptTemplate returns the default template for prompts ai:ignore
 func GetDefaultPromptTemplate() (*template.Template, error) {
-	templateText := `Read the file at {{.File}}. The following comments in this file end with one of the supported markers ('` + strings.Join(supportedAIMarkers, "', '") + `') and are instructions for you to modify this file:
+	templateText := `Read the file at {{.File}}. The following comments are instructions for you to modify this file:
 
 {{range .Markers}}Line {{.LineNumber}}: {{.LineText}}
 {{end}}
-For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. In other words, in response to this prompt, you are only permitted to modify the file at path {{.File}}. Once you make the requested modifications, remove the comment that instructed you.`
+For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. However, if modifying other files would be necessary to address the feedback, explain your reasoning and ask for permission.
+
+Your first edit will be to remove these comment(s) from the file. Next you'll proceed with the implementation to address them. Once you make the requested modifications, your current task is complete and you may await additional instruction.`
 
 	return template.New("prompt").Parse(templateText)
 }
