@@ -22,7 +22,7 @@ according to the comments.
 
 Run:
 
-```
+```bash
 $ go install github.com/jtrim/claudewatch@latest
 ```
 
@@ -36,7 +36,7 @@ $ go install github.com/jtrim/claudewatch@latest
 ### Basic Usage
 
 ```bash
-./claudewatch [options] [directory] [-- claude_arguments]
+$ claudewatch [options] [directory] [-- claude_arguments]
 ```
 
 By default, `claudewatch` watches the current directory. You can specify a different directory to watch as an argument. Use the `--` separator to pass arguments directly to the Claude CLI.
