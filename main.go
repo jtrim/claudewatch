@@ -33,15 +33,13 @@ type Config struct {
 
 // GetDefaultPromptTemplate returns the default template for prompts ai:ignore
 func GetDefaultPromptTemplate() (*template.Template, error) {
-	templateText := `The following comments are instructions for you to modify this file: {{.File}}
-It's critically important for you to understand this task as a sequence of two steps. First, you'll remove the following comments from the file. There's a scary monster watching this file, and if you write this file with these comments present, the scary monster is gonna get you.
-Once you've removed these comments from the file, AND ONLY AFTER THE COMMENTS HAVE BEEN REMOVED, you may move onto your next task, which is to treat the comments as instructions for you to make modifications to this file. The comments are:
+	templateText := `Modify {{.File}}. Address the feedback in the following comments:
 
 {{range .Markers}}Line {{.LineNumber}}: {{.LineText}}
 {{end}}
-For the scope of this instruction, you are not permitted to modify other files as part of the instructions in these comments. However, if modifying other files would be necessary to address the feedback, pause, explain your reasoning and ask for permission.
+For the scope of this instruction, do not modify any other files. However, if modifying other files would be necessary to fully address the feedback, stop, explain your reasoning, and wait for further instruction.
 
-REMEMBER: First, you'll remove these comment(s) from the file. This is a critical instruction not to be ignored. Second, you'll proceed with the implementation to address them. Once you make the requested modifications, your current task is complete and you may await additional instruction.`
+Once your editing task is complete, stop and await instruction.`
 
 	return template.New("prompt").Parse(templateText)
 }
@@ -460,17 +458,37 @@ func main() {
 								continue
 							}
 
-							// Log file change
-							fmt.Fprintf(os.Stderr, "\r\n[File change detected: %s - sending to Claude]\r\n", event.Name)
+							// Store original markers for logging
+							originalMarkers := make([]AIMarkerLocation, len(markers))
+							copy(originalMarkers, markers)
 
-							for _, marker := range markers {
+							// Log file change before processing
+							fmt.Fprintf(os.Stderr, "\r\n[File change detected: %s - sending to Claude]\r\n", event.Name)
+							for _, marker := range originalMarkers {
 								fmt.Fprintf(os.Stderr, "  Line %d: %s\r\n", marker.LineNumber, marker.LineText)
 							}
 
-							// Prepare the template data
+							// Remove AI markers from the file and get updated markers
+							debugLog(&config, "Removing AI markers from file: %s", event.Name)
+							updatedMarkers, err := removeAIMarkersFromFile(event.Name, markers)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "Error removing AI markers: %v\n", err)
+								continue
+							}
+							debugLog(&config, "AI markers successfully removed from file")
+
+							// Log the updated markers for debugging
+							if config.Debug {
+								for i, marker := range updatedMarkers {
+									debugLog(&config, "  Original: Line %d: %s", originalMarkers[i].LineNumber, originalMarkers[i].LineText)
+									debugLog(&config, "  Updated:  Line %d: %s", marker.LineNumber, marker.LineText)
+								}
+							}
+
+							// Prepare the template data with the updated markers
 							data := TemplateData{
 								File:    absPath,
-								Markers: markers,
+								Markers: updatedMarkers,
 							}
 
 							// Execute the template

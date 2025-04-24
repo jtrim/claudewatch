@@ -6,3 +6,4 @@
 README\.md$
 # Ignore the claudewatch binary but not directories
 ^claudewatch$
+ai_marker_removal_test\.go

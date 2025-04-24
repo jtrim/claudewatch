@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -125,6 +126,70 @@ func hasActiveAIMarkers(content string) bool {
 	return len(markers) > 0
 }
 
+// removeAIMarkersFromContent is a pure function that removes AI markers from content
+// and returns both the updated content and updated markers
+func removeAIMarkersFromContent(content string, markers []AIMarkerLocation) (string, []AIMarkerLocation, error) {
+	lines := strings.Split(content, "\n")
+
+	// Create a new slice for the updated markers
+	updatedMarkers := make([]AIMarkerLocation, len(markers))
+
+	// Process each marker by removing the AI marker text from the line
+	for i, marker := range markers {
+		if marker.LineNumber <= 0 || marker.LineNumber > len(lines) {
+			return "", nil, fmt.Errorf("invalid line number %d for content with %d lines", marker.LineNumber, len(lines))
+		}
+
+		lineIndex := marker.LineNumber - 1
+		line := lines[lineIndex]
+
+		// Find and remove all AI markers from this line
+		updatedLine := line
+		for _, markerText := range supportedAIMarkers {
+			// Case insensitive replacement
+			updatedLine = regexp.MustCompile("(?i)"+regexp.QuoteMeta(markerText)).ReplaceAllString(updatedLine, "")
+		}
+
+		// Update the line in the content
+		lines[lineIndex] = updatedLine
+
+		// Create updated marker with the AI marker removed from the text
+		updatedMarkers[i] = AIMarkerLocation{
+			LineNumber: marker.LineNumber,
+			LineText:   updatedLine,
+		}
+	}
+
+	// Join the lines back into content
+	updatedContent := strings.Join(lines, "\n")
+
+	return updatedContent, updatedMarkers, nil
+}
+
+// removeAIMarkersFromFile removes AI markers from a file's comments
+// and returns the updated markers with the marker text removed
+func removeAIMarkersFromFile(filePath string, markers []AIMarkerLocation) ([]AIMarkerLocation, error) {
+	// Read file content
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Process the content
+	updatedContent, updatedMarkers, err := removeAIMarkersFromContent(string(content), markers)
+	if err != nil {
+		return nil, err
+	}
+
+	// Write the updated content back to the file
+	err = os.WriteFile(filePath, []byte(updatedContent), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write updated content: %w", err)
+	}
+
+	return updatedMarkers, nil
+}
+
 // CompileIgnorePattern creates a regular expression from a pattern string
 // It returns the compiled pattern and any error encountered
 func CompileIgnorePattern(pattern string) (*regexp.Regexp, error) {
@@ -153,7 +218,7 @@ func IsHiddenOrSpecialFile(filePath string) bool {
 	if baseName == ".." {
 		return true
 	}
-	
+
 	// Check if it's a hidden file (starts with a dot)
 	// but exclude current directory "."
 	if strings.HasPrefix(baseName, ".") && baseName != "." {
