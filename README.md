@@ -11,11 +11,11 @@ according to the comments.
 ## Features
 
 - Acts as a transparent wrapper for the Claude CLI - use it exactly as you would use the Claude CLI
-- Watches for file changes in the specified directory
+- Watches for file changes across one or more specified directories
 - Detects comments ending with "ai!" in changed files
 - Automatically sends files with AI comments to Claude with specific instructions
-- Customizable prompt template with `--prompt` flag
-- Debug mode with `--debug` flag
+- Customizable prompt template with `--prompt`, or per-directory via a `.claudewatchprompt` file
+- Debug mode with `--debug`, logging to a `.claudewatchdebug` file
 - Support for `.claudewatchignore` file with regex patterns to exclude files from watching
 
 ## Installation
@@ -36,15 +36,15 @@ $ go install github.com/jtrim/claudewatch@latest
 ### Basic Usage
 
 ```bash
-$ claudewatch [options] [directory] [-- claude_arguments]
+$ claudewatch [options] [directory...] [-- claude_arguments]
 ```
 
-By default, `claudewatch` watches the current directory. You can specify a different directory to watch as an argument. Use the `--` separator to pass arguments directly to the Claude CLI.
+By default, `claudewatch` watches the current directory. You can specify one or more directories to watch as arguments. Use the `--` separator to pass arguments directly to the Claude CLI.
 
 ### Command Line Arguments
 
-- `--debug`: Enable debug output
-- `--prompt "template text"`: Customize the prompt template (use `{{.File}}` as a variable for the file path)
+- `--debug`: Enable debug output, appended to a `.claudewatchdebug` file in the current directory (writing to stderr would otherwise be clobbered by Claude's terminal UI)
+- `--prompt "template text"`: Customize the prompt template (use `{{.File}}` as a variable for the file path). Takes precedence over any `.claudewatchprompt` file.
 - `--`: Everything after this marker is passed directly to Claude
 
 ### Examples
@@ -55,6 +55,9 @@ $ claudewatch
 
 # Watch a specific directory
 $ claudewatch /path/to/project
+
+# Watch multiple directories
+$ claudewatch /path/to/project /path/to/other-project
 
 # Enable debug output
 $ claudewatch --debug
@@ -120,6 +123,20 @@ test_.*\.go    # Ignore Go test files with names starting with test_
 ```
 
 Blank lines and lines starting with `#` are ignored. Each regex pattern is applied to the full file path, and if there's a match, the file is excluded from being processed.
+
+When watching multiple directories, `.claudewatchignore` patterns are loaded from every root and merged, so a pattern in one root's ignore file applies across all watched directories.
+
+### Customizing Prompts with .claudewatchprompt
+
+You can override the default prompt template for a changed file by placing a `.claudewatchprompt` file at or above its directory. The file's contents are used as the prompt template, with the same `{{.File}}` and `{{.Markers}}` variables available as with `--prompt`.
+
+When a file changes, `claudewatch` walks upward from that file's directory looking for the nearest `.claudewatchprompt` file, so a prompt file closer to the changed file takes precedence over one further up the tree. If none is found, the built-in default prompt is used. An explicit `--prompt` flag always takes precedence over any `.claudewatchprompt` file.
+
+```
+Please modify {{.File}} according to the following instructions: {{.Markers}}
+
+Keep changes minimal and follow the existing code style.
+```
 
 ## Disclaimer
 
