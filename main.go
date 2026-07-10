@@ -23,12 +23,14 @@ import (
 type Config struct {
 	ClaudeCommand    string             // Command to start the Claude CLI
 	ClaudeArgs       []string           // Arguments for Claude CLI
-	RootDirectory    string             // Directory to watch for changes
+	RootDirectories  []string           // Directories to watch for changes
 	AICommentPattern *regexp.Regexp     // Pattern to detect AI comments
 	PromptTemplate   *template.Template // Template for the prompt when a file changes
 	IgnorePattern    *regexp.Regexp     // Pattern to ignore files when watching
 	IgnorePatterns   IgnorePatterns     // Patterns from .claudewatchignore file
 	Debug            bool               // Enable debug output
+	DebugOut         io.Writer          // Destination for debug output (.claudewatchdebug)
+	DebugPath        string             // Absolute path of the debug output file
 }
 
 // GetDefaultPromptTemplate returns the default template for prompts ai:ignore
@@ -44,6 +46,69 @@ Once your editing task is complete, stop and await instruction.`
 	return template.New("prompt").Parse(templateText)
 }
 
+// loadPromptTemplate reads and parses a .claudewatchprompt file.
+func loadPromptTemplate(path string) (*template.Template, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return template.New("prompt").Parse(string(content))
+}
+
+// promptResolver picks the prompt template for a changed file. Unless a prompt
+// was supplied explicitly (override), it finds the nearest .claudewatchprompt to
+// the file's directory, caching the result per directory so the filesystem walk
+// happens at most once per directory.
+type promptResolver struct {
+	defaultTmpl *template.Template
+	override    *template.Template
+	debugOut    io.Writer
+	mu          sync.Mutex
+	cache       map[string]*template.Template
+}
+
+func newPromptResolver(defaultTmpl, override *template.Template, debugOut io.Writer) *promptResolver {
+	return &promptResolver{
+		defaultTmpl: defaultTmpl,
+		override:    override,
+		debugOut:    debugOut,
+		cache:       make(map[string]*template.Template),
+	}
+}
+
+// resolve returns the prompt template to use for the file at filePath.
+func (r *promptResolver) resolve(filePath string) *template.Template {
+	if r.override != nil {
+		return r.override
+	}
+
+	dir := filepath.Dir(filePath)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if cached, ok := r.cache[dir]; ok {
+		return cached
+	}
+
+	tmpl := r.defaultTmpl
+	if promptPath := findPromptFile(dir); promptPath != "" {
+		if parsed, err := loadPromptTemplate(promptPath); err == nil {
+			tmpl = parsed
+			if r.debugOut != nil {
+				fmt.Fprintf(r.debugOut, "Debug: using prompt template from %s for %s\n", promptPath, dir)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: ignoring unparseable prompt file %s: %v\n", promptPath, err)
+		}
+	} else if r.debugOut != nil {
+		fmt.Fprintf(r.debugOut, "Debug: no .claudewatchprompt found for %s, using default prompt\n", dir)
+	}
+
+	r.cache[dir] = tmpl
+	return tmpl
+}
+
 // Template data structure
 type TemplateData struct {
 	File    string             // Absolute path of the file that changed
@@ -52,21 +117,21 @@ type TemplateData struct {
 
 // Helper function to print debug messages
 func debugLog(config *Config, format string, args ...interface{}) {
-	if config.Debug {
-		fmt.Fprintf(os.Stderr, "Debug: "+format+"\n", args...)
+	if config.Debug && config.DebugOut != nil {
+		fmt.Fprintf(config.DebugOut, "Debug: "+format+"\n", args...)
 	}
 }
 
 // printHelp displays the usage information
 func printHelp() {
-	fmt.Println("Usage: claudewatch [options] [directory] [-- claude_arguments]")
+	fmt.Println("Usage: claudewatch [options] [directory...] [-- claude_arguments]")
 	fmt.Println("")
 	fmt.Println("A transparent wrapper for the Claude CLI that watches file changes and")
 	fmt.Println("automatically sends AI-directed instructions to Claude.")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  -h, --help       Show this help message and exit")
-	fmt.Println("  --debug          Enable debug output")
+	fmt.Println("  --debug          Enable debug output (appended to .claudewatchdebug in the current directory)")
 	fmt.Println("  --prompt TEXT    Customize the prompt template (use {{.File}} for file path and {{.Markers}} for the detected markers with line numbers)")
 	fmt.Println("  --ignore REGEX   Ignore files matching this regex pattern when watching")
 	fmt.Println("  --               Everything after this marker is passed directly to Claude")
@@ -75,10 +140,12 @@ func printHelp() {
 	fmt.Println("  - Add '" + strings.Join(supportedAIMarkers, "', '") + "' at the end of a comment to trigger Claude to process that instruction") // ai:ignore
 	fmt.Println("  - Add 'ai:ignore' in a comment line before or on the same line as an instruction marker to skip processing it")                  // ai:ignore
 	fmt.Println("  - Create a .claudewatchignore file with one regex pattern per line to exclude files from being watched")
+	fmt.Println("  - Place a .claudewatchprompt file at or above the run directory to override the default prompt (nearest wins; --prompt still takes precedence)")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  claudewatch                   # Watch current directory")
 	fmt.Println("  claudewatch /path/to/project  # Watch specific directory")
+	fmt.Println("  claudewatch dir1 dir2         # Watch multiple directories")
 	fmt.Println("  claudewatch --ignore \"\\.js$\" # Ignore all .js files")
 	fmt.Println("  claudewatch -- --model-name claude-3-opus-20240229")
 	fmt.Println("")
@@ -198,12 +265,42 @@ func main() {
 	config := Config{
 		ClaudeCommand:    "claude",
 		ClaudeArgs:       []string{},
-		RootDirectory:    ".",
+		RootDirectories:  nil,
 		AICommentPattern: markerPattern, // Using pattern from util.go
 		PromptTemplate:   tmpl,
 		IgnorePattern:    nil,   // Default to not ignoring any files
 		IgnorePatterns:   nil,   // Will be loaded from .claudewatchignore
 		Debug:            false, // Debug mode off by default
+	}
+
+	// Detect --debug up front (before the full parse) so diagnostics from
+	// argument parsing are captured too. When set, append them to a
+	// .claudewatchdebug file in the current directory instead of the terminal,
+	// where Claude's full-screen TUI would otherwise clobber them.
+	for _, arg := range os.Args[1:] {
+		if arg == "--" {
+			break
+		}
+		if arg == "--debug" {
+			config.Debug = true
+			break
+		}
+	}
+	if config.Debug {
+		debugPath, absErr := filepath.Abs(".claudewatchdebug")
+		if absErr != nil {
+			debugPath = ".claudewatchdebug"
+		}
+		debugFile, openErr := os.OpenFile(debugPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if openErr != nil {
+			fmt.Fprintf(os.Stderr, "Error opening debug log %s: %v\n", debugPath, openErr)
+			os.Exit(1)
+		}
+		defer debugFile.Close()
+		config.DebugOut = debugFile
+		config.DebugPath = debugPath
+		fmt.Fprintf(debugFile, "\n=== claudewatch debug session started %s ===\n", time.Now().Format(time.RFC3339))
+		fmt.Fprintf(os.Stderr, "claudewatch: --debug enabled, appending debug output to %s\n", debugPath)
 	}
 
 	// Starting message that will only be shown in debug mode
@@ -212,7 +309,7 @@ func main() {
 	// Parse command line arguments
 	args := os.Args[1:]
 	var claudeArgs []string
-	watchDirSpecified := false
+	promptFromFlag := false
 
 	// Process arguments
 	for i := 0; i < len(args); i++ {
@@ -243,6 +340,7 @@ func main() {
 					os.Exit(1)
 				}
 				config.PromptTemplate = tmpl
+				promptFromFlag = true
 				debugLog(&config, "Using custom prompt template: %s", customTemplate)
 				debugLog(&config, "Note: Make sure your template contains {{.Markers}} for line numbers")
 				i++ // Skip the next argument (the template)
@@ -266,15 +364,11 @@ func main() {
 			}
 		}
 
-		// Check if arg is a directory to watch
-		if !watchDirSpecified {
-			fileInfo, err := os.Stat(arg)
-			if err == nil && fileInfo.IsDir() {
-				config.RootDirectory = arg
-				watchDirSpecified = true
-				debugLog(&config, "Watching directory: %s", config.RootDirectory)
-				continue
-			}
+		// Check if arg is a directory to watch (multiple directories allowed)
+		if fileInfo, statErr := os.Stat(arg); statErr == nil && fileInfo.IsDir() {
+			config.RootDirectories = append(config.RootDirectories, arg)
+			debugLog(&config, "Watching directory: %s", arg)
+			continue
 		}
 
 		// If we get here, this is an argument to pass to Claude
@@ -287,13 +381,31 @@ func main() {
 		debugLog(&config, "Passing arguments to Claude: %v", config.ClaudeArgs)
 	}
 
-	// Load ignore patterns from .claudewatchignore if it exists
-	ignorePatterns, err := LoadIgnorePatterns(config.RootDirectory)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Error loading .claudewatchignore file: %v\n", err)
-	} else if ignorePatterns != nil {
-		config.IgnorePatterns = ignorePatterns
-		debugLog(&config, "Loaded %d patterns from .claudewatchignore", len(ignorePatterns))
+	// Default to watching the current directory if none were specified
+	if len(config.RootDirectories) == 0 {
+		config.RootDirectories = []string{"."}
+	}
+
+	// Build the prompt resolver. When --prompt is given it wins for every file;
+	// otherwise the nearest .claudewatchprompt to each changed file is used,
+	// discovered per change and cached per directory.
+	var promptOverride *template.Template
+	if promptFromFlag {
+		promptOverride = config.PromptTemplate
+	}
+	resolver := newPromptResolver(config.PromptTemplate, promptOverride, config.DebugOut)
+
+	// Load ignore patterns from .claudewatchignore in each watched root
+	for _, root := range config.RootDirectories {
+		ignorePatterns, loadErr := LoadIgnorePatterns(root)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Error loading .claudewatchignore in %s: %v\n", root, loadErr)
+			continue
+		}
+		if ignorePatterns != nil {
+			config.IgnorePatterns = append(config.IgnorePatterns, ignorePatterns...)
+			debugLog(&config, "Loaded %d patterns from %s/.claudewatchignore", len(ignorePatterns), root)
+		}
 	}
 
 	// Create a new file watcher
@@ -304,12 +416,12 @@ func main() {
 	}
 	defer watcher.Close()
 
-	// Recursively add all directories to watch from the start
-	debugLog(&config, "Setting up recursive file watching from root: %s", config.RootDirectory)
-	err = watchDirectory(watcher, config.RootDirectory, &config, false)
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up recursive file watching: %v\n", err)
+	// Recursively add all directories to watch from each root
+	for _, root := range config.RootDirectories {
+		debugLog(&config, "Setting up recursive file watching from root: %s", root)
+		if watchErr := watchDirectory(watcher, root, &config, false); watchErr != nil {
+			fmt.Fprintf(os.Stderr, "Error setting up recursive file watching for %s: %v\n", root, watchErr)
+		}
 	}
 
 	// Debug: Check if Claude executable exists
@@ -424,6 +536,14 @@ func main() {
 							continue
 						}
 
+						// Never react to writes to our own debug log; logging the
+						// skip below would write to it again and loop forever.
+						if config.DebugPath != "" {
+							if abs, absErr := filepath.Abs(event.Name); absErr == nil && abs == config.DebugPath {
+								continue
+							}
+						}
+
 						// Skip hidden and special files
 						if IsHiddenOrSpecialFile(event.Name) {
 							debugLog(&config, "Skipping hidden or special file: %s", event.Name)
@@ -491,9 +611,10 @@ func main() {
 								Markers: updatedMarkers,
 							}
 
-							// Execute the template
+							// Execute the template (resolved per file, cached per dir)
+							promptTmpl := resolver.resolve(absPath)
 							var promptBuf strings.Builder
-							err = config.PromptTemplate.Execute(&promptBuf, data)
+							err = promptTmpl.Execute(&promptBuf, data)
 							if err != nil {
 								fmt.Fprintf(os.Stderr, "Error executing prompt template: %v\n", err)
 								continue

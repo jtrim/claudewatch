@@ -46,9 +46,9 @@ func foo() {
 
 	// Expected markers after removal
 	expectedMarkers := []AIMarkerLocation{
-		{LineNumber: 5, LineText: "    // This should be refactored "},
+		{LineNumber: 5, LineText: "    // This should be refactored"},
 		{LineNumber: 8, LineText: "    //  This needs better error handling"},
-		{LineNumber: 11, LineText: "    // This should be optimized for performance "},
+		{LineNumber: 11, LineText: "    // This should be optimized for performance"},
 	}
 
 	// Call the function

@@ -29,6 +29,29 @@ func isEmacsTemp(filename string) bool {
 	return false
 }
 
+// findPromptFile walks upward from startDir looking for a .claudewatchprompt
+// file. It returns the path of the nearest one (closest to startDir), or an
+// empty string if none exists between startDir and the filesystem root.
+func findPromptFile(startDir string) string {
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return ""
+	}
+
+	for {
+		candidate := filepath.Join(dir, ".claudewatchprompt")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 // supportedAIMarkers contains all the supported AI markers
 var supportedAIMarkers = []string{"ai!", "!ai", "ai?"}
 
@@ -149,6 +172,10 @@ func removeAIMarkersFromContent(content string, markers []AIMarkerLocation) (str
 			// Case insensitive replacement
 			updatedLine = regexp.MustCompile("(?i)"+regexp.QuoteMeta(markerText)).ReplaceAllString(updatedLine, "")
 		}
+
+		// A marker at the end of the line leaves trailing whitespace behind;
+		// strip it so we don't write trailing spaces back into the file.
+		updatedLine = strings.TrimRight(updatedLine, " \t")
 
 		// Update the line in the content
 		lines[lineIndex] = updatedLine
