@@ -2,11 +2,11 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 jobs:
-  goreleaser:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -15,11 +15,39 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Determine version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG="v${VERSION}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Tagging and releasing happen in this same job/run (rather than a
+      # separate workflow triggered by the tag push) because pushes made with
+      # GITHUB_TOKEN don't trigger other workflow runs - a `push: tags:`
+      # workflow here would never fire.
+      - name: Create tag
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
       - uses: actions/setup-go@v5
+        if: steps.version.outputs.exists == 'false'
         with:
           go-version-file: go.mod
 
       - uses: goreleaser/goreleaser-action@v6
+        if: steps.version.outputs.exists == 'false'
         with:
           distribution: goreleaser
           version: latest
