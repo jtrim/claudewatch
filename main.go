@@ -510,6 +510,18 @@ func main() {
 						return
 					}
 
+					// Never react to writes to our own debug log, and never log
+					// this skip either: logging it would write to the debug file,
+					// triggering another event and looping forever. This check must
+					// stay first, before any debugLog call in this case.
+					if config.DebugPath != "" {
+						if abs, absErr := filepath.Abs(event.Name); absErr == nil && abs == config.DebugPath {
+							continue
+						}
+					}
+
+					debugLog(&config, "Received event: %s (op: %s)", event.Name, event.Op)
+
 					// Process write events and create events
 					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
 						// Check if the file/directory exists
@@ -536,14 +548,6 @@ func main() {
 							continue
 						}
 
-						// Never react to writes to our own debug log; logging the
-						// skip below would write to it again and loop forever.
-						if config.DebugPath != "" {
-							if abs, absErr := filepath.Abs(event.Name); absErr == nil && abs == config.DebugPath {
-								continue
-							}
-						}
-
 						// Skip hidden and special files
 						if IsHiddenOrSpecialFile(event.Name) {
 							debugLog(&config, "Skipping hidden or special file: %s", event.Name)
@@ -555,6 +559,7 @@ func main() {
 							debugLog(&config, "Skipping file due to %s: %s", reason, event.Name)
 							continue
 						}
+						debugLog(&config, "Watching file: %s", event.Name)
 
 						// Skip files processed recently
 						now := time.Now()
