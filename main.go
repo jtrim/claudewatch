@@ -31,6 +31,8 @@ type Config struct {
 	Debug            bool               // Enable debug output
 	DebugOut         io.Writer          // Destination for debug output (.claudewatchdebug)
 	DebugPath        string             // Absolute path of the debug output file
+	ErrorOut         io.Writer          // Destination for always-on status/error output (.claudewatcherror)
+	ErrorPath        string             // Absolute path of the error output file
 }
 
 // GetDefaultPromptTemplate returns the default template for prompts ai:ignore
@@ -122,6 +124,15 @@ func debugLog(config *Config, format string, args ...interface{}) {
 	}
 }
 
+// errorLog prints always-on status/error messages to .claudewatcherror.
+// These must never go to the live terminal: once Claude's PTY-based TUI owns
+// it, a direct write from claudewatch would corrupt its rendering.
+func errorLog(config *Config, format string, args ...interface{}) {
+	if config.ErrorOut != nil {
+		fmt.Fprintf(config.ErrorOut, format+"\n", args...)
+	}
+}
+
 // printHelp displays the usage information
 func printHelp() {
 	fmt.Println("Usage: claudewatch [options] [directory...] [-- claude_arguments]")
@@ -193,7 +204,7 @@ func watchDirectory(watcher *fsnotify.Watcher, dirPath string, config *Config, s
 	if !skipRoot {
 		err = watcher.Add(dirPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error watching directory %s: %v\n", dirPath, err)
+			errorLog(config, "Error watching directory %s: %v", dirPath, err)
 		} else {
 			debugLog(config, "Watching directory: %s", dirPath)
 		}
@@ -302,6 +313,23 @@ func main() {
 		fmt.Fprintf(debugFile, "\n=== claudewatch debug session started %s ===\n", time.Now().Format(time.RFC3339))
 		fmt.Fprintf(os.Stderr, "claudewatch: --debug enabled, appending debug output to %s\n", debugPath)
 	}
+
+	// Always open .claudewatcherror for status/error output that must
+	// survive regardless of --debug: once Claude's PTY-based TUI owns the
+	// terminal, writing there directly would corrupt its rendering.
+	errorPath, errAbsErr := filepath.Abs(".claudewatcherror")
+	if errAbsErr != nil {
+		errorPath = ".claudewatcherror"
+	}
+	errorFile, errOpenErr := os.OpenFile(errorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if errOpenErr != nil {
+		fmt.Fprintf(os.Stderr, "Error opening error log %s: %v\n", errorPath, errOpenErr)
+		os.Exit(1)
+	}
+	defer errorFile.Close()
+	config.ErrorOut = errorFile
+	config.ErrorPath = errorPath
+	fmt.Fprintf(errorFile, "\n=== claudewatch session started %s ===\n", time.Now().Format(time.RFC3339))
 
 	// Starting message that will only be shown in debug mode
 	debugLog(&config, "Starting claudewatch...")
@@ -460,13 +488,23 @@ func main() {
 	// Make sure to close the pty at the end
 	defer ptyMaster.Close()
 
+	// claudeDone is closed once Claude exits, so anything still trying to
+	// write into the PTY (in particular the prompt injector) can stop
+	// instead of repeatedly failing against a dead process.
+	claudeDone := make(chan struct{})
+	var claudeWaitErr error
+	go func() {
+		claudeWaitErr = claudeCmd.Wait()
+		close(claudeDone)
+	}()
+
 	// Handle pty size
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
 	go func() {
 		for range ch {
 			if err := pty.InheritSize(os.Stdin, ptyMaster); err != nil {
-				fmt.Fprintf(os.Stderr, "Error resizing pty: %s\n", err)
+				errorLog(&config, "Error resizing pty: %s", err)
 			}
 		}
 	}()
@@ -485,13 +523,26 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// syncedPty serializes writes into the PTY: the human's forwarded
+	// keystrokes and injected marker-fix prompts are two independent write
+	// sources, and without this they could interleave at the byte level.
+	syncedPty := &syncWriter{w: ptyMaster}
+
+	// pasteDetector watches Claude's output for the bracketed-paste enable
+	// sequence, so injected prompts can be wrapped the same way a real
+	// paste would be reported (see injector.go).
+	pasteDetector := &pasteModeDetector{}
+
 	// Goroutine to copy stdin to the pty and the pty to stdout
 	go func() {
 		defer wg.Done()
 		// Copy stdin to the pty
-		go func() { io.Copy(ptyMaster, os.Stdin) }()
-		// Copy the pty to stdout
-		io.Copy(os.Stdout, ptyMaster)
+		go func() { io.Copy(syncedPty, os.Stdin) }()
+		// Copy the pty to stdout, watching for the bracketed-paste enable
+		// sequence along the way.
+		if err := copyAndDetectPaste(os.Stdout, ptyMaster, pasteDetector); err != nil {
+			errorLog(&config, "Error copying Claude output: %v", err)
+		}
 	}()
 
 	// Goroutine to handle file change prompts
@@ -510,13 +561,16 @@ func main() {
 						return
 					}
 
-					// Never react to writes to our own debug log, and never log
-					// this skip either: logging it would write to the debug file,
-					// triggering another event and looping forever. This check must
-					// stay first, before any debugLog call in this case.
-					if config.DebugPath != "" {
-						if abs, absErr := filepath.Abs(event.Name); absErr == nil && abs == config.DebugPath {
-							continue
+					// Never react to writes to our own debug/error logs, and
+					// never log this skip either: logging it would write to
+					// one of those files, triggering another event and
+					// looping forever. This check must stay first, before
+					// any debugLog call in this case.
+					if config.DebugPath != "" || config.ErrorPath != "" {
+						if abs, absErr := filepath.Abs(event.Name); absErr == nil {
+							if abs == config.DebugPath || abs == config.ErrorPath {
+								continue
+							}
 						}
 					}
 
@@ -588,16 +642,16 @@ func main() {
 							copy(originalMarkers, markers)
 
 							// Log file change before processing
-							fmt.Fprintf(os.Stderr, "\r\n[File change detected: %s - sending to Claude]\r\n", event.Name)
+							errorLog(&config, "File change detected: %s - sending to Claude", event.Name)
 							for _, marker := range originalMarkers {
-								fmt.Fprintf(os.Stderr, "  Line %d: %s\r\n", marker.LineNumber, marker.LineText)
+								errorLog(&config, "  Line %d: %s", marker.LineNumber, marker.LineText)
 							}
 
 							// Remove AI markers from the file and get updated markers
 							debugLog(&config, "Removing AI markers from file: %s", event.Name)
 							updatedMarkers, err := removeAIMarkersFromFile(event.Name, markers)
 							if err != nil {
-								fmt.Fprintf(os.Stderr, "Error removing AI markers: %v\n", err)
+								errorLog(&config, "Error removing AI markers: %v", err)
 								continue
 							}
 							debugLog(&config, "AI markers successfully removed from file")
@@ -621,7 +675,7 @@ func main() {
 							var promptBuf strings.Builder
 							err = promptTmpl.Execute(&promptBuf, data)
 							if err != nil {
-								fmt.Fprintf(os.Stderr, "Error executing prompt template: %v\n", err)
+								errorLog(&config, "Error executing prompt template: %v", err)
 								continue
 							}
 
@@ -634,36 +688,33 @@ func main() {
 					if !ok {
 						return
 					}
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					errorLog(&config, "Error: %v", err)
 				}
 			}
 		}()
 
-		// Process prompts from file changes
+		// Process prompts from file changes, injecting each one via
+		// bracketed paste when Claude's TUI supports it (see injector.go)
+		// so multi-line prompts land as one literal block, and stopping
+		// cleanly once Claude has exited.
+		inj := &injector{
+			writer:     syncedPty,
+			detector:   pasteDetector,
+			claudeDone: claudeDone,
+			errorLogFn: func(format string, args ...interface{}) { errorLog(&config, format, args...) },
+			debugLogFn: func(format string, args ...interface{}) { debugLog(&config, format, args...) },
+		}
 		for prompt := range promptChan {
-			// Write prompt to Claude's stdin
-			debugLog(&config, "Writing prompt to Claude's PTY")
-			_, err := ptyMaster.Write([]byte(prompt))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing prompt to Claude's PTY: %v\r\n", err)
-			}
-
-			// Add a delay to ensure prompt is fully processed
-			time.Sleep(300 * time.Millisecond)
-
-			// Try just Carriage Return (ASCII 13)
-			debugLog(&config, "Sending Carriage Return (ASCII 13) only")
-			_, err = ptyMaster.Write([]byte{13})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error sending CR to Claude's PTY: %v\r\n", err)
+			if err := inj.inject(prompt); err != nil && err != errClaudeExited {
+				errorLog(&config, "Error injecting prompt: %v", err)
 			}
 		}
 	}()
 
 	// Wait for Claude to finish
-	err = claudeCmd.Wait()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Claude process ended with error: %v\n", err)
+	<-claudeDone
+	if claudeWaitErr != nil {
+		fmt.Fprintf(os.Stderr, "Claude process ended with error: %v\n", claudeWaitErr)
 	}
 
 	// Close the prompt channel and wait for goroutines to finish
